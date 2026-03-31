@@ -620,7 +620,7 @@ import forest
 nodes = forest.query(context="project:forest", limit=10)
 print([n.id for n in nodes])
 ```
-```
+
 
 **Likely path (Markdown-primary variant):** Markdown + YAML frontmatter as the
 **source of truth on disk**, with SQLite and DuckDB as **derived indexes**
@@ -730,6 +730,7 @@ FedWiki's output format is an homage and a practical choice simultaneously.
 The choices above are not independent. A few critical chains:
 
 **Rust-first stack:**
+
 ```
 Language choice (Rust core + Python + TypeScript)
   → SQLite + DuckDB store (Rust SQLite bindings are mature)
@@ -739,6 +740,7 @@ Language choice (Rust core + Python + TypeScript)
 ```
 
 **Go-first stack (§11):**
+
 ```
 Go single binary
   → modernc/sqlite (pure Go, no CGO) or go-duckdb (CGO, worth it for DuckDB)
@@ -750,6 +752,7 @@ Go single binary
 ```
 
 **AI provider abstraction (§13):**
+
 ```
 OpenAI-compatible HTTP interface as internal contract
   → Config file maps model names → provider base URLs
@@ -759,6 +762,7 @@ OpenAI-compatible HTTP interface as internal contract
 ```
 
 **Markdown-primary portability (§14):**
+
 ```
 Markdown + YAML frontmatter as source of truth on disk
   → SQLite + DuckDB are derived indexes (rebuilt via `forest reindex`)
@@ -768,6 +772,7 @@ Markdown + YAML frontmatter as source of truth on disk
 ```
 
 **Publishing surface (§15):**
+
 ```
 ActivityPub + content negotiation as the federation layer
   → text/html     → FedWiki client + page JSON
@@ -778,6 +783,7 @@ ActivityPub + content negotiation as the federation layer
 ```
 
 **ULID node IDs (all stacks):**
+
 ```
 ULID as local ID, promoted to URL on publish
   → Time-ordered scans for temporal context queries
