@@ -383,9 +383,141 @@ are shown in full before being applied to any record node.
 
 ---
 
+## Executable Nodes
+
+### The TWiki precedent
+
+TWiki's transformation from a document store into a platform happened
+largely because of one feature: executable content. Variables, macros, and
+eventually plugins meant that a page could *do* something — query data,
+render conditionally, pull in external information, automate a workflow.
+Users who would never have thought of themselves as programmers began writing
+functional content because the execution was embedded in the thing they were
+already editing. The document and the program were the same artefact.
+
+Forest inherits this opportunity directly. A node that contains a SQL query
+over an external-reference node is already executable in everything but name.
+The step to arbitrary code is a declaration, not an architectural change.
+
+This lineage also connects to a less-documented precedent: a small startup
+in Brisbane in the 1980s — name approximately *Mana*, details currently
+unverified — that built a multi-modal programming environment inspired by
+Smalltalk, in which different kinds of computation coexisted in the same
+addressable, live document space. The vision was ahead of its time and ahead
+of its infrastructure. Forest is in a position to revisit it with three
+decades of tooling behind it.
+
+The more recent parallels — Marimo, Jupyter notebooks, Observable — confirm
+the pattern: when code, data, and prose share an addressable container with
+reactive execution, the result is qualitatively more useful than any of the
+three separately.
+
+### Executable node types
+
+An executable node declares a runtime and contains source. Everything else
+— inputs, outputs, caching, dependency links — follows from the node model
+already established.
+
+| Runtime | Primary use |
+|---|---|
+| SQL | Queries over local node store or external-reference nodes |
+| Python | Data transformation, analysis, visualisation |
+| JavaScript / TypeScript | UI components, browser-side computation, reactive views |
+| Shell | System integration, ingestion pipelines |
+| JSONata | Fragment queries and live transclusion expressions |
+| Marimo / IPython | Reactive notebook cells with rich output |
+| WebAssembly | Sandboxed computation, language-agnostic portability |
+| Prompt (LLM) | AI synthesis as a declared, versioned, rerunnable step |
+
+The runtime list is open. A node's `content_type` field carries the runtime
+declaration (`application/x-python`, `application/sql`,
+`application/x-prompt+llm`, etc.). The execution environment is resolved
+at runtime by the node's host instance; unknown runtimes degrade gracefully
+to displaying source.
+
+### Inputs, outputs, and the dependency graph
+
+An executable node has:
+
+- **inputs**: links to other nodes (prose, structured data, or executable)
+  whose content or output it consumes. Declared explicitly or inferred from
+  the source by static analysis where possible.
+- **outputs**: the result of execution — a value, a dataset, a rendered
+  component, a set of new or enriched nodes. Outputs are cached and
+  addressed like any other node content.
+- **triggers**: when inputs change (a linked node is enriched, an external
+  dataset updates, a context shifts), the node can be set to re-execute
+  automatically, on demand, or never.
+
+This makes the graph partially reactive. A chain of executable nodes — a
+data ingestion node feeding a transformation node feeding a visualisation
+node — behaves like a Marimo notebook or an Observable cell graph, but
+each step is independently addressable, linkable, and ageable. A
+visualisation node from three years ago that depended on a dataset node
+that has since aged is not broken — it is dormant, and can be revived by
+re-executing against the current state of its inputs.
+
+### Prompt nodes
+
+A prompt node is an executable node whose runtime is an LLM. It contains:
+
+- a prompt template (with references to input nodes as context variables)
+- a model declaration (which model, which parameters)
+- a version history of prior executions and their outputs
+
+This makes AI synthesis a first-class, reproducible, auditable operation
+rather than a conversational side effect. A prompt node that summarises
+a set of research nodes is part of the graph. It can be re-run when its
+input nodes are enriched. Its output is a versioned node linked back to
+the prompt node that generated it. The provenance chain is complete.
+
+This is how the AI layer described earlier becomes composable: instead of
+the system deciding when and how to invoke AI synthesis, the user declares
+it explicitly as a node. The system still offers ambient AI assistance
+(suggesting enrichments, inferring context), but deliberate synthesis is
+authored, not automatic.
+
+### Execution and trust
+
+Executable nodes introduce a trust surface that prose and data nodes do
+not have. A node received from a federated instance, or ingested from an
+external source, must not execute automatically. Execution requires
+explicit user authorisation, per node, with the source visible.
+
+Trust levels:
+
+- **User-authored**: executes with the permissions of the local instance.
+- **Trusted instance**: executes in a declared sandbox; outputs are
+  treated as external until reviewed.
+- **Untrusted / external**: source is shown; execution requires explicit
+  one-time confirmation; runs in a maximally restricted sandbox with no
+  access to the local graph.
+
+The sandbox model is WebAssembly where possible (language-portable,
+capability-restricted by construction), with container isolation as a
+fallback for runtimes that cannot be compiled to WASM.
+
+### Executable nodes and the view layer
+
+The same topology-indifference that applies to structured data applies
+here. A context view does not distinguish between:
+
+- a prose node describing a dataset
+- a structured-data node containing the dataset
+- an executable node that queries and transforms the dataset
+- an executable node that renders a visualisation of the dataset
+
+All four can appear in the same context stream. The rendered output of an
+executable node is its face in the stream; the source is accessible on
+expand, exactly as version history is for prose nodes. A user interacting
+with a live chart in a context view need not know or care that it is the
+output of a Python node executing against a DuckDB external reference.
+
+---
+
+## Data Storage
 
 
-### Node Schema (simplified)
 
 ```json
 {
@@ -735,6 +867,10 @@ at any time, on their own terms.
 | JSONata | Declarative expression language for JSON traversal and projection | Use as the fragment query language for live transclusion |
 | SQL | Relational query over structured data | Expose as a read-only developer surface over the local node store; delegate to external engines for external-reference nodes |
 | DuckDB / DuckLake | In-process OLAP over local and remote Parquet/Arrow data | Model for external-reference nodes: the node is a pointer + query; DuckDB materialises the view at query time |
+| TWiki | Executable macros/plugins turning a wiki into a platform | Apply the same inflection point: executable nodes as first-class graph citizens |
+| Jupyter / Marimo | Reactive notebook cells, code/data/prose in one artefact | Make each cell independently addressable, ageable, and federable |
+| Mana (Brisbane, ~1980s) | Multi-modal Smalltalk-inspired live programming environment (details unverified) | Revisit the vision with current tooling: multiple runtimes in a shared addressable space |
+| Smalltalk | Live objects, late binding, image as the running system | Apply the "everything is a live object" principle to nodes: data, code, and UI in the same addressable graph |
 
 ---
 
