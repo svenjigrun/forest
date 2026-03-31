@@ -308,38 +308,503 @@ schema but is representable in an open, standard format.
 
 ---
 
+## 11. Go-First Stack Variant
+
+The sections above favour a Rust core. Go is a credible alternative that
+trades raw performance for far faster iteration, simpler cross-compilation,
+and a richer ecosystem for the HTTP/federation surface. This section
+re-examines the stack through a Go-first lens.
+
+| Option | Prior use | Fit | Trade-offs |
+|---|---|---|---|
+| **Go as the sole backend language** | CockroachDB, Gitea, Mattermost, age (encryption), many CLI/server tools | High | Single binary, `go build` cross-compiles to Linux/macOS/Windows/ARM with no fuss; goroutines map well to per-node async work; CGO is the friction point for embedding models |
+| **Go core + Python subprocess for AI** | Pattern used by many Go tools that need ML (e.g. Sourcegraph's Cody backend) | High | Go owns the store, graph, HTTP server; Python subprocess handles embedding and LLM calls over a local socket; clean boundary; no CGO required for the AI path |
+| **Go + ONNX Runtime via CGO** | Used in production Go ML pipelines | Medium | Embedding models (nomic-embed-text, MiniLM) run natively in-process via ONNX; eliminates the Python subprocess; CGO complicates cross-compilation |
+| **Go + Wasm host (wazero)** | Wazero is a pure-Go WASM runtime; used in several Go plugin systems | High | No CGO; sandboxes executable nodes in Go-native WASM; wazero is mature and actively maintained; smaller runtime than Wasmtime but no JIT (slower for compute-heavy nodes) |
+| **Go + templ/htmx for the web UI** | Used in several Go-native web apps as an alternative to a JS SPA | Medium | Eliminates the TypeScript layer; server-side rendering with htmx for interactivity; much simpler to reason about; limited for the canvas mode and live transclusion |
+
+**Likely path (Go variant):** **Go as the sole backend**, with **wazero for
+executable node sandboxing**, **`charm.land/fantasy` (or a vendored copy of
+crush's routing layer) for multi-provider AI** (see section 13), and either
+a **Charmbracelet TUI** (see section 12) or a minimal **templ/htmx web UI**
+for early prototyping. The single-binary story is compelling: `forest` ships
+as one executable, embeds the SQLite or DuckDB store, and runs a local HTTP
+server. No installer, no runtime dependency, no virtual environment.
+
+Go's standard library covers the HTTP server, JSON handling, and concurrent
+node operations. The `database/sql` interface works with both SQLite
+(`mattn/go-sqlite3` via CGO, or `modernc/sqlite` in pure Go) and DuckDB
+(`marcboeker/go-duckdb`). The federation HTTP handlers are idiomatic Go.
+Embedding models are the one remaining gap: either a Python subprocess over
+a Unix socket, or CGO via ONNX Runtime (`yalue/go-onnxruntime`). The Python
+path keeps the main binary CGO-free; the ONNX path keeps it single-process.
+
+**Impact on future ideas:** The Go variant's single-binary nature makes it
+easier to ship Forest as a tool that runs alongside other developer tools —
+similar to how `age`, `mkcert`, or `gh` are installed and forgotten. A
+Go-native Forest is also easier to embed in other systems (a CI pipeline,
+a home server, a NAS) than a multi-runtime Rust/Python/TypeScript stack.
+
+---
+
+## 12. TUI Frontend (Charmbracelet)
+
+A terminal UI is not a consolation prize for the absence of a GUI. For a
+knowledge tool used primarily by developers and power users, a TUI is often
+the right first surface: no install friction, scriptable, composable with
+shell workflows, and operable over SSH. The Charmbracelet suite (Bubbletea,
+Lipgloss, Glamour, Bubbles) makes idiomatic Go TUIs viable.
+
+| Option | Prior use | Fit | Trade-offs |
+|---|---|---|---|
+| **Bubbletea (Charmbracelet) + Lipgloss** | Charm CLI tools, `gum`, `soft-serve`, many modern Go TUIs | High | Elm-architecture model (update/view/message); composable components; Lipgloss for styled layout; Glamour for rendered Markdown; active community; pairs naturally with a Go backend |
+| **tview (rivo/tview)** | `k9s`, several data-inspection TUIs | Medium | Widget-based; mature; easier to learn than Bubbletea for simple layouts; less composable for complex reactive UIs; not as actively styled |
+| **Textual (Python)** | `posting`, `rich`, several Python CLI tools | Medium | Rich layout, CSS-like styling, async-native; but Python runtime dependency; out of place in a Go stack |
+| **Ink (React in the terminal, Node.js)** | Many Node.js CLI tools | Low | React component model is familiar; Node.js runtime dependency; not the right fit for a Go-native tool |
+| **Raw termbox / tcell** | Low-level foundations for tview, Bubbletea | Low as primary | Maximum control; requires building all abstractions from scratch; only warranted if Bubbletea's model proves limiting |
+
+**TUI layout for Forest's core interactions:**
+
+The stream mode maps naturally to a TUI split pane:
+
+```
+┌─────────────────────────────────┬───────────────────────────┐
+│ CONTEXT: project:forest + Q2    │ NODE DETAIL               │
+│─────────────────────────────────│───────────────────────────│
+│ [01HXZJ] The paragraph is the   │ ID: 01HXZJ...             │
+│   atom of meaning. #3 links     │ Created: 2026-03-31       │
+│                                 │ Links: cites (2)          │
+│ [01HWAB] Purple Numbers assign  │ Contexts: project:forest  │
+│   persistent IDs... #1 link     │                           │
+│                                 │ CONTENT                   │
+│ [01HW99] Executable nodes let   │ The paragraph is the atom │
+│   code live in the graph...     │ of meaning. Context is a  │
+│                                 │ lens, not a folder.       │
+│ > [cursor: write new node]      │                           │
+│                                 │ LINKED NODES              │
+│ Context: [q]uery [l]ocation     │ → cites 01HWAB            │
+│          [t]ime [s]ave [f]ork   │ → cites 01HW55            │
+└─────────────────────────────────┴───────────────────────────┘
+```
+
+Glamour renders Markdown in the detail pane. Lipgloss handles borders and
+colour theming. The context switcher is a Bubbles `textinput` component at
+the bottom of the left pane.
+
+**Likely path:** **Bubbletea + Lipgloss + Glamour** as the primary early
+interface. The TUI exposes the full node lifecycle (write, enrich, link, split,
+merge), the context engine (active context, query, save, fork), and the version
+history viewer. Canvas mode (the 2D force-directed layout) is deferred — a TUI
+cannot render it usefully, but a TUI can print a text-format graph summary
+(adjacency list, depth-limited tree) that serves the same orientation purpose
+at early prototype scale.
+
+**Impact on future ideas:** A TUI-first approach means the core is driven
+entirely by a well-defined interface (the local HTTP API or direct Go function
+calls), which makes adding a web UI, a desktop GUI, or a mobile client
+later purely additive — the surface is already proven. Charmbracelet's
+`wish` library (SSH server for TUI apps) means a Forest instance can be
+accessed remotely over SSH without any additional web server infrastructure.
+
+---
+
+## 13. AI Provider Abstraction (Multi-Provider Routing)
+
+Prompt nodes declare a model, not an API key. The system must route a prompt
+node's execution to whichever provider the user has configured, without
+Forest's core knowing about each provider's SDK. This is the multi-provider
+abstraction problem.
+
+### What charmbracelet/crush does (and doesn't) offer
+
+Crush (https://github.com/charmbracelet/crush) is a TUI coding assistant
+written in Go, actively developed (v0.53.0, March 2026), and solves exactly
+this problem for its own use. It is **not an importable library** — all
+routing logic lives under `internal/` — but it is the clearest Go reference
+implementation available, and its architecture is worth understanding and
+potentially copying.
+
+Crush's provider layer rests on two private Charm libraries:
+
+- **`charm.land/fantasy`** — an abstract `LanguageModel` interface with
+  concrete provider implementations for Anthropic, OpenAI, Google Gemini,
+  AWS Bedrock, OpenRouter, and Vercel AI Gateway. This is the Go equivalent
+  of LangChain's LLM abstraction, built by Charm specifically for their tools.
+- **`charm.land/catwalk`** — a provider registry/catalogue that Crush fetches
+  at startup (with a local cache fallback) to discover available models and
+  their capabilities.
+- **`github.com/charmbracelet/anthropic-sdk-go`** and
+  **`github.com/charmbracelet/openai-go`** — Charm's own forks of the
+  Anthropic and OpenAI Go SDKs, used as the HTTP clients under the hood.
+
+The routing layer itself is small — approximately 870 lines across five files:
+
+| File | Lines | Role |
+|---|---|---|
+| `internal/app/provider.go` | 95 | Model string parsing (`provider/model` syntax), match/validate |
+| `internal/config/provider.go` | 231 | Config loading, provider list caching, concurrent Catwalk + Hyper fetch with 45s timeout + cache fallback |
+| `internal/config/catwalk.go` | 82 | Catwalk sync and cache management |
+| `internal/config/hyper.go` | 124 | Charm Hyper (managed inference) sync |
+| `internal/agent/hyper/provider.go` | 338 | Hyper provider implementation: `Generate()`, `Stream()`, error handling (402/429/401) |
+
+### Can this code be copied into Forest?
+
+**License:** Crush is under **FSL-1.1-MIT** (Functional Source License). This
+permits use in non-competing products. FSL-1.1 automatically converts to full
+MIT two years after each release — so any code from early 2025 releases is
+already MIT; code from the current (2026) releases converts in 2028. Forest
+is not a competing product to a TUI coding assistant, so the FSL restriction
+does not apply. Attribution is still required.
+
+**Practical assessment:**
+
+The routing layer is modular and self-contained enough to copy, but carries
+two dependencies that need a decision:
+
+1. **`charm.land/fantasy`** — this is the load-bearing abstraction. Options:
+   - Import it directly (it is a public Go module at `charm.land/fantasy`);
+     Forest gets all providers for free and tracks upstream changes.
+   - Copy and adapt it; Forest owns the interface and can trim to only the
+     providers it needs.
+   - Write a thinner equivalent (see below); simpler but loses Charm's
+     provider implementations.
+
+2. **`charm.land/catwalk`** — the provider registry is a Charm-operated
+   service. Forest almost certainly does not want to depend on an external
+   registry for its provider list. Replace with a local config file.
+
+**Recommended approach — three tiers:**
+
+*Tier 1 (minimal, ~100 lines):* Copy `internal/app/provider.go`'s model
+string parsing logic only. Implement your own `Provider` interface with a
+`Generate(ctx, prompt, opts) (string, error)` and
+`Stream(ctx, prompt, opts) (<-chan string, error)` signature. Write one
+concrete implementation per provider shape.
+
+*Tier 2 (standard, ~400 lines):* Import `charm.land/fantasy` directly as a
+Go module dependency. Copy and adapt `internal/config/provider.go` for
+config loading and caching, replacing the Catwalk fetch with a local YAML
+config file. This gives Forest Anthropic, OpenAI, Gemini, Bedrock, and
+OpenRouter implementations for free.
+
+*Tier 3 (full):* Copy all five files listed above, replace the Catwalk/Hyper
+service calls with local config, and keep the Charm Hyper provider only if
+Forest plans to offer managed inference as a feature.
+
+### Comparison of provider options
+
+| Option | Prior use | Fit | Trade-offs |
+|---|---|---|---|
+| **Import `charm.land/fantasy` directly** | Used by crush and other Charm tools | High | Public Go module; covers Anthropic, OpenAI, Google, Bedrock, OpenRouter, Vercel; maintained by Charm; couples Forest to Charm's release cycle |
+| **Copy and adapt crush's routing layer (~400 lines)** | As above, but vendored | High | Forest owns the code; no upstream coupling; ~400 lines to maintain; FSL-1.1-MIT allows this; Catwalk dependency replaced with local config |
+| **OpenAI-compatible HTTP direct + thin Anthropic adapter** | Ollama, LM Studio, LocalAI, vLLM, GitHub Models, OpenRouter all speak OpenAI wire format | High | Minimal dependency; two HTTP client shapes cover ~95% of the market; pure Go; no Charm coupling; requires writing the Anthropic adapter (~100 lines) |
+| **LiteLLM as a local sidecar proxy** | Widely used in Python LLM stacks; supports 100+ providers | Medium | Moves all adapter logic out of Go entirely; adds a Python process; useful if a Python subprocess is already running for embeddings; operational overhead |
+| **openrouter.ai as the sole provider gateway** | OpenRouter aggregates Claude, GPT-4o, Gemini, Llama, Mistral via one OpenAI-compatible API | Medium | Single API key, single endpoint, zero adapter code; pay-per-token; loses offline/local model support; user must trust a third-party gateway |
+
+**Likely path:** **Tier 2 — import `charm.land/fantasy` and adapt crush's
+config loading layer**, replacing Catwalk with a local YAML config. This gives
+Forest a working multi-provider layer in a day rather than a week, with a
+clear upgrade path to Tier 1 (write own interface) if the Charm dependency
+proves limiting. The config file maps model aliases to providers:
+
+```yaml
+models:
+  default: claude-sonnet-4-6
+  providers:
+    claude-sonnet-4-6:
+      provider: anthropic
+      api_key: $ANTHROPIC_API_KEY
+    gpt-4o:
+      provider: openai
+      api_key: $OPENAI_API_KEY
+    local-llama:
+      provider: ollama          # OpenAI-compatible
+      base_url: http://localhost:11434/v1
+    openrouter-mixtral:
+      provider: openrouter
+      api_key: $OPENROUTER_API_KEY
+    github-models:
+      provider: openai          # GitHub Models is OpenAI-compatible
+      base_url: https://models.inference.ai.azure.com
+      api_key: $GITHUB_TOKEN
+```
+
+Providers that speak the OpenAI wire format (`ollama`, `github-models`,
+`openrouter`) need no adapter — `charm.land/fantasy/providers/openai` or a
+direct `go-openai` client handles them. Anthropic's native API shape (different
+auth header, `system` field handling) is covered by
+`charm.land/fantasy/providers/anthropic`.
+
+**Impact on future ideas:** A prompt node's model declaration is just a key
+from this config file. A user can share a prompt node via ActivityPub; the
+receiving instance executes it against *their own* configured model, not the
+sender's. The model is a hint, not a hard dependency. Per-prompt-node cost
+tracking and A/B testing across model quality on the same template both fall
+out of this routing layer with minimal additional work.
+
+---
+
+## 14. Markdown + YAML as Canonical Portability Format
+
+Section 10 treats Markdown + YAML frontmatter as an additional export target.
+This section argues for treating it as the **primary on-disk format** —
+the thing the user can read, edit, and version-control independently of Forest
+running — with the operational store (SQLite or DuckDB) as a derived index
+over it.
+
+This is the Obsidian/Foam/Dendron model, but applied consistently to *all*
+node types, not just prose.
+
+| Option | Prior use | Fit | Trade-offs |
+|---|---|---|---|
+| **Markdown + YAML frontmatter as source of truth** | Obsidian, Foam, Dendron, Logseq (mostly), Jekyll, Hugo | High for prose nodes | Human-readable, git-friendly, editor-agnostic; YAML frontmatter carries ID, links, contexts, provenance; the file *is* the node; version history is git history; doesn't handle structured/executable nodes cleanly |
+| **SQLite as source of truth, Markdown as export** | Notion (proprietary DB → Markdown export), Bear (SQLite → export) | High for operational use | Faster queries; no file system scan on startup; but the graph is opaque without the app; export is a second-class citizen and often lags behind the operational format |
+| **YAML-only (no Markdown body)** | Configuration systems, Kubernetes manifests | Low | Structured nodes (schema nodes, context nodes) are YAML-native; prose nodes are not; splitting the format by node type creates two conventions |
+| **JSON frontmatter + Markdown body** | Some static site generators; MDX | Medium | More precise than YAML; less human-writable; JSON doesn't support multi-line values elegantly; most tooling expects YAML frontmatter |
+| **Plain Markdown with inline syntax for metadata** | Logseq (properties as `key:: value`), Org-mode | Medium | Zero frontmatter overhead; metadata is in-band; but non-standard; hard to parse reliably; conflicts with Markdown renderers that don't know the convention |
+
+**File layout for a Markdown + YAML canonical store:**
+
+```
+forest/
+  nodes/
+    01HXZJ.md        ← prose node
+    01HWAB.md
+    01HW99.md        ← executable node (runtime declared in frontmatter)
+  schemas/
+    contact-v1.md   ← schema node (YAML frontmatter + description body)
+  contexts/
+    project-forest.md  ← context node
+  index.db           ← derived: sqlite index for fast query + embeddings
+  index.duckdb       ← derived: duckdb for structured/external-ref queries
+```
+
+A prose node file:
+
+```markdown
+---
+id: 01HXZJ
+content_type: text/markdown
+created_at: 2026-03-31T09:14:00Z
+provenance:
+  source: user
+links:
+  - type: cites
+    target: 01HWAB
+  - type: transcluded_from
+    target: https://bob.example/nodes/01HWAB
+contexts:
+  - project:forest
+  - time:2026-Q1
+---
+
+The paragraph is the atom of meaning.
+```
+
+An executable node file:
+
+```markdown
+---
+id: 01HW99
+content_type: application/x-python
+created_at: 2026-04-01T10:00:00Z
+runtime: python
+trust: user
+inputs:
+  - 01HWAB
+triggers: on-input-change
+---
+
+```python
+import forest
+nodes = forest.query(context="project:forest", limit=10)
+print([n.id for n in nodes])
+```
+```
+
+**Likely path (Markdown-primary variant):** Markdown + YAML frontmatter as the
+**source of truth on disk**, with SQLite and DuckDB as **derived indexes**
+rebuilt from the file tree on startup or on file-system watch events.
+Version history is git — `git log nodes/01HXZJ.md` shows every enrichment.
+The operational store is a cache, not the record; losing it is never
+catastrophic because `forest reindex` regenerates it.
+
+This trades some query performance (a cold index rebuild is slower than an
+always-live SQLite store) for full transparency and editor-agnosticism. A user
+can edit a node file in Vim, and Forest picks up the change. A user can `grep`
+their graph without the app. A user can push their graph to a Git remote and
+have full history without any Forest-specific sync infrastructure.
+
+**Impact on future ideas:** The Markdown-primary model composes naturally with
+the federated wiki publishing surface (section 15 below). Publishing a node
+is a git push; the federation layer reads the published files and wraps them
+in ActivityPub. Schema nodes and context nodes are YAML-heavy files that read
+awkwardly as Markdown but remain human-inspectable. Executable nodes store
+their source in a fenced code block — the file is both the node record and a
+runnable script that any editor with language support can syntax-highlight.
+
+---
+
+## 15. HTML Publishing and Federated Wiki UI
+
+When Forest nodes are published, they need a web representation. The question
+is not just static HTML generation — it is the interaction model for the
+published surface. Ward Cunningham's Federated Wiki (FedWiki / Smallest
+Federated Wiki) offers a specific and underexplored model that aligns closely
+with Forest's own design principles.
+
+| Option | Prior use | Fit | Trade-offs |
+|---|---|---|---|
+| **Federated Wiki (Ward Cunningham's SFW/Fedwiki)** | Fedwiki.org; used in research and education communities; inspired several personal knowledge tools | High | Page-as-JSON with paragraph-level forks and attributions; side-by-side multi-site navigation; content travels with attribution when forked; the "journal" is an append-only edit log per page; aligns with Forest's node history model |
+| **Static site generator (Hugo, Eleventy, Astro)** | GitHub Pages, many personal sites, digital gardens | Medium | Simple, fast, widely understood; one-way publish; no federation; no paragraph-level addressability in the published output |
+| **Datasette (SQLite → web)** | Datasette is used by journalists and researchers to publish SQLite databases as browsable, queryable web sites | High for structured nodes | One command publishes the SQLite store as a searchable web interface; excellent for structured data nodes; not designed for prose reading |
+| **Single-page app served from the local HTTP server** | Roam Research's published graphs, Obsidian Publish | Medium | The Forest TUI/GUI renders the same data; publish is just making the local server publicly accessible; but no offline-readable static output |
+| **ActivityPub + HTML via content negotiation** | Mastodon's web profiles, any ActivityPub server with a web UI | High | The node URL returns HTML for browsers and JSON-LD for ActivityPub clients; this is the minimal viable "published node" — no separate publishing pipeline needed |
+
+**The FedWiki model in detail:**
+
+Federated Wiki represents each page as a JSON document containing an array of
+"items" (paragraphs, images, code blocks) and a "journal" of changes. Pages
+are forked by copying the JSON; the fork retains the original's attribution.
+Navigation is side-by-side: opening a link opens the linked page *alongside*
+the current one, building a left-to-right lineage of context.
+
+This maps onto Forest with little distortion:
+
+- A Forest node is a FedWiki page (one item per Forest node, or a context
+  view as a multi-item page).
+- The node's version history is the FedWiki journal.
+- Transcluding a node is forking it — the transclusion carries attribution
+  back to the source URL.
+- The side-by-side navigation model is Forest's context stream rendered
+  spatially: each context is a column, linked nodes open to the right.
+
+A Forest publishing pipeline targeting FedWiki output:
+
+```
+forest publish --format fedwiki --output ./public
+
+public/
+  pages/
+    01hxzj.json    ← FedWiki page JSON for this node
+    01hwab.json
+  index.html       ← FedWiki client app (the standard SFW client)
+  status/
+    01hxzj         ← ActivityPub actor/object for this node (content negotiation)
+```
+
+The FedWiki client is a JavaScript single-page app that reads the JSON pages
+and renders the side-by-side view. It is small (~50KB), self-contained, and
+already handles the fork/attribution model. Forest's publish step generates
+the JSON; the FedWiki client renders it.
+
+**Likely path:** **ActivityPub + HTML via content negotiation as the primary
+federation mechanism**, with **FedWiki-format JSON as the static publishing
+target** for read-oriented public sites. The two are not in conflict: the
+same node URL can return:
+
+- `text/html` → a human-readable page with the FedWiki client embedded
+- `application/activity+json` → the ActivityPub Object for federation
+- `application/ld+json` → the JSON-LD representation for semantic consumers
+- `application/json` → the FedWiki page JSON for FedWiki clients
+
+Content negotiation routes to the right representation. A Forest instance
+that is publicly accessible handles all four. A static export (for hosting on
+a CDN or GitHub Pages) handles the first and third via separate files at
+predictable paths.
+
+**Impact on future ideas:** The FedWiki side-by-side navigation model is a
+natural complement to Forest's stream mode. When a user is reading published
+nodes from another Forest instance, the side-by-side view shows the source
+instance's context alongside their own — directly visualising the federation.
+Cunningham's "neighbourhood" concept (the set of sites a FedWiki installation
+watches and can fork from) maps directly to Forest's follow/subscribe model
+over ActivityPub. The two systems are, in effect, expressing the same idea
+through different implementations; building Forest's publishing layer on
+FedWiki's output format is an homage and a practical choice simultaneously.
+
+---
+
 ## Decision Dependencies
 
 The choices above are not independent. A few critical chains:
 
+**Rust-first stack:**
 ```
 Language choice (Rust core + Python + TypeScript)
   → SQLite + DuckDB store (Rust SQLite bindings are mature)
   → sqlite-vec for embeddings (same process as the store)
   → Tauri for the desktop shell (Rust → WebView IPC)
   → Wasmtime for sandbox (already in the Rust process)
+```
 
-ULID node IDs
+**Go-first stack (§11):**
+```
+Go single binary
+  → modernc/sqlite (pure Go, no CGO) or go-duckdb (CGO, worth it for DuckDB)
+  → charm.land/fantasy (or vendored crush routing layer) for multi-provider AI (§13)
+  → Python subprocess over Unix socket for embedding models only (no LLM traffic)
+  → wazero for executable node sandbox (pure Go WASM, no CGO)
+  → Bubbletea TUI (§12) as the primary early interface
+  → templ/htmx web UI as a lightweight browser alternative
+```
+
+**AI provider abstraction (§13):**
+```
+OpenAI-compatible HTTP interface as internal contract
+  → Config file maps model names → provider base URLs
+  → Claude, OpenAI, GitHub Copilot/Models, OpenRouter, Ollama all supported
+  → LiteLLM sidecar handles non-OpenAI-compatible providers (Anthropic native API)
+  → Prompt nodes store model name, not provider — portable across instances
+```
+
+**Markdown-primary portability (§14):**
+```
+Markdown + YAML frontmatter as source of truth on disk
+  → SQLite + DuckDB are derived indexes (rebuilt via `forest reindex`)
+  → Version history is git — no custom VCS needed
+  → Editor-agnostic: any text editor can read/write nodes
+  → Feeds directly into the FedWiki publishing pipeline (§15)
+```
+
+**Publishing surface (§15):**
+```
+ActivityPub + content negotiation as the federation layer
+  → text/html     → FedWiki client + page JSON
+  → application/activity+json → ActivityPub Object
+  → application/ld+json → JSON-LD for semantic consumers
+  → Static export targets GitHub Pages / CDN without a running server
+  → FedWiki "neighbourhood" maps to ActivityPub follow/subscribe
+```
+
+**ULID node IDs (all stacks):**
+```
+ULID as local ID, promoted to URL on publish
   → Time-ordered scans for temporal context queries
   → Natural merge identity (older ULID survives)
   → Clean path to ActivityPub URL-as-ID
-
-ActivityPub federation
-  → JSON-LD wire format is already the portability format
-  → Content negotiation: HTML for browsers, JSON-LD for AP clients
-  → Vocabulary extensions cover typed links, schema nodes, context nodes
-
-Dual-track AI (local + remote)
-  → Ollama for ambient (privacy, offline, low latency)
-  → Claude API for deliberate prompt node execution
-  → Model declaration in prompt nodes = model is a parameter
+  → Stable path segment in FedWiki JSON filenames
 ```
 
-The Rust core is the load-bearing choice. Everything else has multiple valid
-options; Rust (or its absence) determines the embedding story, the sandbox
-story, and the desktop story simultaneously. If Rust is off the table, the
-fallback is Go for the core + Python for AI + Electron for the shell —
-a slightly heavier but equally coherent stack.
+The two viable full stacks are:
+
+| Concern | Rust-first | Go-first |
+|---|---|---|
+| Core language | Rust | Go |
+| Store | SQLite + DuckDB | SQLite (modernc) + DuckDB (CGO) |
+| Embeddings | ONNX in-process | Python subprocess |
+| Sandbox | Wasmtime | wazero |
+| Primary UI | Tauri + React | Bubbletea TUI |
+| Web UI | TypeScript SPA | templ/htmx |
+| AI routing | Direct SDK calls | `charm.land/fantasy` or vendored crush routing (§13) |
+| Portability | JSON-LD primary, Markdown additional | Markdown+YAML primary, JSON-LD for federation |
+| Publishing | ActivityPub + content negotiation | FedWiki JSON + ActivityPub |
+
+The Go-first stack is the lower-friction path to a working prototype. The Rust-
+first stack has higher performance headroom and a more coherent desktop story.
+Neither forecloses the other: the Go stack's local HTTP API is the same
+interface the Rust stack would expose, so a rewrite of the core is possible
+without changing the federation or UI layers.
 
 ---
 
