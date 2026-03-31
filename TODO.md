@@ -105,7 +105,7 @@ index rebuilt from those files, updated incrementally while the app runs.
 
 ### 1.5 — `forest init` and `forest reindex` CLI commands
 
-- Package `cmd/forest`: cobra-based CLI (dependency: `github.com/spf13/cobra`)
+- Package `cmd/forest`: kong-based CLI (dependency: `github.com/alecthomas/kong`)
 - `forest init [dir]` — creates the directory layout (`nodes/`, `schemas/`,
   `contexts/`, `.forest/`) and writes a default `config.yaml`
 - `forest reindex` — calls `index.Build`, prints progress, exits
