@@ -16,6 +16,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/marcboeker/go-duckdb v1.8.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
+	github.com/rjeczalik/notify v0.9.3 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	golang.org/x/exp v0.0.0-20250128182459-e0ece0dbea4c // indirect
 	golang.org/x/mod v0.22.0 // indirect

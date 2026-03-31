@@ -8,6 +8,7 @@ package index
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,10 @@ func (idx *Index) DeleteNode(id string) error {
 	return tx.Commit()
 }
 
+// parseNodeFile is a package-level helper used by the watcher.
+func parseNodeFile(r io.Reader) (*node.Node, error) {
+	return node.ParseFrom(r)
+}
 // CountNodes returns the total number of rows in the nodes table.
 func (idx *Index) CountNodes() (int, error) {
 	var n int
