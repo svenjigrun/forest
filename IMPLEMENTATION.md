@@ -335,15 +335,104 @@ Go's standard library covers the HTTP server, JSON handling, and concurrent
 node operations. The `database/sql` interface works with both SQLite
 (`mattn/go-sqlite3` via CGO, or `modernc/sqlite` in pure Go) and DuckDB
 (`marcboeker/go-duckdb`). The federation HTTP handlers are idiomatic Go.
-Embedding models are the one remaining gap: either a Python subprocess over
-a Unix socket, or CGO via ONNX Runtime (`yalue/go-onnxruntime`). The Python
-path keeps the main binary CGO-free; the ONNX path keeps it single-process.
+Embedding models are the one remaining gap in a pure-Go stack — this is
+covered in detail in section 11a below.
 
 **Impact on future ideas:** The Go variant's single-binary nature makes it
 easier to ship Forest as a tool that runs alongside other developer tools —
 similar to how `age`, `mkcert`, or `gh` are installed and forgotten. A
 Go-native Forest is also easier to embed in other systems (a CI pipeline,
 a home server, a NAS) than a multi-runtime Rust/Python/TypeScript stack.
+
+---
+
+## 11a. Embedding Models in a Pure-Go Stack
+
+This is the hardest gap in the Go-first story. A thorough survey of the
+Go ecosystem (as of early 2026) finds no mature, truly CGO-free in-process
+transformer model runner. The options and their honest trade-offs:
+
+| Option | Module | CGO-free? | Quality | Maturity | Verdict |
+|---|---|---|---|---|---|
+| **Ollama via HTTP** | stdlib `net/http` | Yes — Forest's code is pure Go; Ollama runs as a separate service | High (`nomic-embed-text` 768-dim, `all-minilm` 384-dim, `mxbai-embed-large`) | Production-grade | **Recommended** |
+| **hugot** | `github.com/knights-analytics/hugot` | No — pulls in `yalue/onnxruntime_go` (CGO) and `knights-analytics/ortgenai` (CGO) | High (ONNX models including `all-MiniLM-L6-v2`) | 583 stars, active | Works if CGO is acceptable; breaks clean cross-compile |
+| **cybertron** | `github.com/nlpodyssey/cybertron` | No — transitive CGO via `gopsutil` and `go-ole` | Good (BERT-based, HuggingFace-compatible) | 325 stars, maintained | Same CGO caveat; spago (its foundation) is paused |
+| **gonnx** | `github.com/advancedclimatesystems/gonnx` | Yes — pure Go ONNX runtime | Unknown — operator coverage incomplete (117 open issues) | Experimental | Risky; must verify every op used by target model |
+| **Python subprocess** | stdlib `os/exec` | Yes — Forest's Go code is CGO-free; Python runs out-of-process | High (full sentence-transformers ecosystem) | Proven pattern | Adds a runtime dependency; clean boundary |
+
+### Why the gap exists
+
+Transformer models require efficient matrix operations. In Python, NumPy/PyTorch
+call into optimised C/CUDA kernels. In Go, the same requirement forces a choice:
+CGO to the same C libraries, or a pure-Go matrix library (gorgonia/tensor,
+gomlx) that is slower and less battle-tested. The Go ML ecosystem has not yet
+converged on a production-grade pure-Go inference path for modern transformer
+architectures.
+
+### The Ollama path in detail
+
+If Forest already uses Ollama for LLM calls (section 13), extending it to
+embeddings costs nothing architecturally. Ollama's `/api/embeddings` endpoint
+is production-grade, supports the same models Forest needs, and the Go client
+is a handful of lines of stdlib:
+
+```go
+type embedRequest struct {
+    Model  string `json:"model"`
+    Prompt string `json:"prompt"`
+}
+type embedResponse struct {
+    Embedding []float32 `json:"embedding"`
+}
+
+func embed(ctx context.Context, text string) ([]float32, error) {
+    body, _ := json.Marshal(embedRequest{Model: "nomic-embed-text", Prompt: text})
+    req, _ := http.NewRequestWithContext(ctx, "POST",
+        "http://localhost:11434/api/embeddings",
+        bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    var result embedResponse
+    json.NewDecoder(resp.Body).Decode(&result)
+    return result.Embedding, nil
+}
+```
+
+The trade-off: Ollama must be running. For a developer tool this is
+acceptable — Ollama is installed once (`brew install ollama` or equivalent)
+and runs as a background service. The analogy to a database is apt: Forest
+does not embed Postgres either.
+
+The graceful-degradation path: if Ollama is not running, Forest falls back to
+BM25 keyword ranking only. Context inference and semantic similarity are
+disabled with a clear status indicator. The system remains fully functional
+for writing, linking, and structured queries — only the relevance ranking
+loses the semantic layer.
+
+### Model dimensions for Forest's scale
+
+| Model | Dimensions | Size | Notes |
+|---|---|---|---|
+| `nomic-embed-text` | 768 | ~250 MB | Better semantic capture; recommended for dense graphs |
+| `all-minilm` (Ollama) | 384 | ~22 MB | 2× faster embed/search; sufficient for sparse graphs |
+| `mxbai-embed-large` | 1024 | ~670 MB | Highest quality; only warranted at large scale |
+
+For tens of thousands of nodes with 768-dim vectors, the sqlite-vec index
+stays under ~600 MB of storage — comfortably within single-user constraints.
+
+### Likely path (embedding, Go variant)
+
+**Ollama as the embedding service**, using `nomic-embed-text` by default,
+with a config option to point at any OpenAI-compatible embeddings endpoint
+(OpenAI's `text-embedding-3-small`, Voyage AI, etc.) as an alternative.
+The `hugot` library with CGO is the fallback for users who want fully
+in-process operation and are willing to accept CGO. This is documented as
+an opt-in build tag (`-tags hugot`) rather than the default, preserving the
+clean cross-compilation story for the standard build.
 
 ---
 
@@ -739,13 +828,14 @@ Language choice (Rust core + Python + TypeScript)
   → Wasmtime for sandbox (already in the Rust process)
 ```
 
-**Go-first stack (§11):**
+**Go-first stack (§11/11a):**
 
 ```
 Go single binary
   → modernc/sqlite (pure Go, no CGO) or go-duckdb (CGO, worth it for DuckDB)
   → charm.land/fantasy (or vendored crush routing layer) for multi-provider AI (§13)
-  → Python subprocess over Unix socket for embedding models only (no LLM traffic)
+  → Ollama HTTP client for embeddings — pure Go, no CGO (§11a)
+  → hugot + CGO as opt-in build tag for fully in-process embeddings (§11a)
   → wazero for executable node sandbox (pure Go WASM, no CGO)
   → Bubbletea TUI (§12) as the primary early interface
   → templ/htmx web UI as a lightweight browser alternative
@@ -798,7 +888,7 @@ The two viable full stacks are:
 |---|---|---|
 | Core language | Rust | Go |
 | Store | SQLite + DuckDB | SQLite (modernc) + DuckDB (CGO) |
-| Embeddings | ONNX in-process | Python subprocess |
+| Embeddings | ONNX in-process | Ollama HTTP (pure Go); hugot+CGO as opt-in build tag (§11a) |
 | Sandbox | Wasmtime | wazero |
 | Primary UI | Tauri + React | Bubbletea TUI |
 | Web UI | TypeScript SPA | templ/htmx |
