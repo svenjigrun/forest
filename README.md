@@ -146,6 +146,17 @@ act as a filter and a view. It holds:
 Contexts compose: a context can include other contexts by reference, and can
 be saved, shared, or forked.
 
+Because contexts are nodes, they obey the same lifecycle rules as content
+nodes. When the user opens a new context — by entering a query, changing
+location, or starting a session — the system first searches for an existing
+context node that closely matches. If one is found, it is reused and
+optionally enriched (e.g. its query expression is sharpened, its display
+config updated). A new context node is only created when no existing one is
+a good enough match. This keeps the context graph from fragmenting in the
+same way that content nodes might: "work at the blue desk" and "working from
+home, Tuesday mornings" are probably the same context, and the system should
+recognise that rather than accumulate both.
+
 ### External Ingestion
 
 External information is pulled and stored as nodes with provenance. An
@@ -323,16 +334,91 @@ separable.
 
 ---
 
-## Open Questions / Design Tensions
+## Ageing
+
+Not all nodes and contexts are equally relevant at all times. A node
+recording what a user thought about a job they held twenty years ago is not
+worthless — but it should not compete on equal footing with what they are
+working on this week. Ageing is the mechanism by which the graph gracefully
+recedes without losing anything.
+
+### What ageing is not
+
+Ageing is not deletion and not archiving in the traditional sense. The node
+remains fully intact, searchable, and linkable. Ageing only affects two
+things: **default relevance ranking** (aged nodes rank lower unless
+explicitly surfaced) and **contextual visibility** (they do not appear in
+ambient views unless the active context or query pulls them in).
+
+### How nodes age
+
+Each node carries a **recency signal** — a composite of:
+
+- time since last user edit
+- time since last user view (not just passive appearance in a stream, but
+  deliberate interaction: expanding, linking, querying)
+- the ageing of the contexts it belongs to (a node in only aged contexts
+  ages faster)
+
+Recency decays on a long, non-linear curve. The curve is slow at first —
+something from last year is not noticeably aged. But it accelerates for
+nodes that have seen no interaction in years. There is no cliff: a node from
+twenty years ago is simply ranked very low by default, not invisible.
+
+The decay rate is per-node, not global. A node the user touches once a year
+resets. A node never revisited after creation ages steadily. This means
+the graph self-organises: the user's active conceptual surface stays dense
+and high-signal; the distant past recedes to the periphery.
+
+### How contexts age
+
+Context nodes age the same way, with one addition: a context's ageing also
+reflects the ageing of the nodes it most commonly surfaces. A context built
+around a job role, a project, or a place will naturally age as the nodes it
+draws on age. The system does not need to know that the user left a job — it
+infers it from the pattern of non-interaction.
+
+### Recall
+
+Aged nodes and contexts are always reachable. Three signals bring them
+forward:
+
+1. **Explicit query** — the user asks about something old. Aged nodes
+   matching the query surface normally, with a subtle indicator that the
+   content is long-untouched.
+2. **Contextual resonance** — the user is writing something that strongly
+   resembles an aged node. The system surfaces it as a suggested link or
+   enrichment source, flagged as dormant: "you wrote about this in 2008."
+3. **Context revival** — the user activates (or is auto-matched to) an aged
+   context. All the nodes it draws on are temporarily de-aged for that
+   session, allowing the user to re-enter a past conceptual state without
+   those nodes polluting their current ambient view afterwards.
+
+### The value of the aged periphery
+
+The aged portion of the graph is not waste. It is the record of who the user
+was, what they knew, and how they thought across time. The fact that it
+recedes by default is not a loss — it is what makes the active surface
+legible. And because ageing is a ranking signal rather than a deletion,
+the user retains the ability to re-engage with any part of their history
+at any time, on their own terms.
+
+---
+
+
 
 - **Identity and addressability across devices**: Purple Numbers assumed a
   single canonical document. In a distributed, sync'd graph, what does a
   stable, shareable node address look like? Content-hashing, UUIDs, or
   something cryptographic?
 
-- **Context explosion**: If contexts are composable and saved, the user may
-  accumulate hundreds of them. How do you manage contexts without recreating
-  the folder problem that pages represented?
+- **Context explosion** (partially addressed): Because contexts are nodes
+  and follow the same enrich-before-create rule, the system resists
+  proliferation structurally. But the matching problem is harder for
+  contexts than for content nodes — two contexts may have identical query
+  expressions but different emotional or temporal intent, and collapsing
+  them would be wrong. The similarity threshold for context reuse needs to
+  be more conservative than for content enrichment.
 
 - **Latency of relevance ranking**: Embedding-based ranking over a large
   local graph must be fast enough to feel live. At what node count does this
