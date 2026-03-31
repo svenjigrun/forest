@@ -1,4 +1,9 @@
-# Purple Extended: A Pageless, Context-Driven Information Space
+# Forest: A Pageless, Context-Driven Information Space
+
+Forest (`#375700`) takes its name from the colour inverse of Purple Numbers'
+`#C8A8FF` — the muted violet used by Eugene Kim (eekim) in his Purple Numbers
+project at https://eekim.com/software/purple/. The complementary colour is a
+dark olive-forest green: R 255−200, G 255−168, B 255−255.
 
 ## Origin: Purple Numbers
 
