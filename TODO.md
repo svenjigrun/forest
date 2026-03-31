@@ -230,48 +230,57 @@ index rebuilt from those files, updated incrementally while the app runs.
 
 ## Stage 4 — AI provider abstraction
 
+Uses `charm.land/fantasy` (Tier 2 from IMPLEMENTATION.md §13) as the provider
+abstraction. This brings `charm.land/fantasy` and Charm's own Anthropic/OpenAI
+SDK forks (`github.com/charmbracelet/anthropic-sdk-go`,
+`github.com/charmbracelet/openai-go`) as `go.mod` entries. All provider
+implementations (Anthropic, OpenAI-compatible, Gemini, Bedrock, OpenRouter)
+come from `charm.land/fantasy/providers/*`; Forest does not write HTTP client
+code for individual providers.
+
 ### 4.1 — Provider config
 
 - Package `internal/provider`: `Config` loaded from `config.yaml` under the
-  forest root; maps model aliases to provider base URLs and API keys
-- `Provider` interface: `Complete(ctx, systemPrompt, userPrompt string, opts Options) (string, error)`
-  and `Stream(ctx, systemPrompt, userPrompt string, opts Options) (<-chan string, error)`
-- `Options`: `Model string`, `MaxTokens int`, `Temperature float64`
-- Default config includes entries for `claude-sonnet-4-6` (Anthropic), `gpt-4o`
-  (OpenAI), `local` (Ollama at localhost)
-- Tests: config round-trips YAML; `NewProvider(cfg)` returns the correct
-  concrete type for each provider key
+  forest root; maps model aliases to `charm.land/fantasy` provider+model pairs
+- `NewProvider(cfg Config) (fantasy.ChatLanguageModel, error)` — resolves a
+  model alias from the config and returns the appropriate `fantasy` provider
+- Default config includes entries for `claude-sonnet-4-6` (Anthropic),
+  `gpt-4o` (OpenAI), `local` (Ollama via the OpenAI-compatible provider)
+- Dependency: `charm.land/fantasy` — **requires approval per the new-module
+  rule above; present this task's module comparison before adding to go.mod**
+- Tests: config round-trips YAML; `NewProvider` returns the correct fantasy
+  provider type for each alias; missing alias returns a clear error
 - **Acceptance:** `make test` passes; `CGO_ENABLED=0 go build ./...` succeeds
 
-### 4.2 — OpenAI-compatible provider
+### 4.2 — OpenAI-compatible provider wiring
 
-- Concrete `OpenAIProvider` that speaks the OpenAI chat completions API
-- Covers: OpenAI, Ollama (`/v1/chat/completions`), GitHub Models, OpenRouter —
-  all use the same wire format
-- Uses `net/http` directly; no third-party SDK (keeps CGO-free)
-- Tests: `httptest.NewServer` mock; test complete and stream paths; test non-200
-  error handling
-- **Acceptance:** `make test` passes; `forest prompt --model local "summarise this node"` works against a running Ollama
+- Wire Ollama, GitHub Models, and OpenRouter through
+  `charm.land/fantasy/providers/openai` with a custom `BaseURL` option — all
+  three speak the OpenAI wire format
+- Add config entries for each in the default `config.yaml`
+- Tests: mock server using `httptest`; verify each alias resolves to the OpenAI
+  fantasy provider with the correct base URL set
+- **Acceptance:** `make test` passes; `forest prompt --model local "hello"` works
+  against a running Ollama
 
-### 4.3 — Anthropic provider
+### 4.3 — Anthropic provider wiring
 
-- Concrete `AnthropicProvider` for Claude via the Anthropic Messages API
-- Different auth header (`x-api-key`), different request body shape (`system` as
-  top-level field, not a message), different SSE stream format
-- Falls back gracefully if `ANTHROPIC_API_KEY` is not set (returns a clear error,
-  does not panic)
-- Tests: mock server; test complete and stream; test missing API key path
-- **Acceptance:** `make test` passes; `forest prompt --model claude-sonnet-4-6 "..."` works with a real API key set in the environment
+- Wire Claude through `charm.land/fantasy/providers/anthropic`
+- Falls back gracefully if `ANTHROPIC_API_KEY` is unset (clear error, no panic)
+- Tests: mock server; test complete and stream paths; test missing API key path
+- **Acceptance:** `make test` passes; `forest prompt --model claude-sonnet-4-6 "..."` works with a real API key in the environment
 
 ### 4.4 — Prompt node execution
 
 - `forest exec <node-id>` — reads an executable node whose `content_type` is
   `application/x-prompt+llm`; resolves its input nodes from the store; builds
-  the prompt; calls the configured provider; writes the output as a new node
-  enrichment (version bump on the node, not a new node) pending user review
-- Output is shown as a diff in the TUI right pane with `[a]ccept / [e]dit / [d]iscard`
-- Tests: fixture prompt node + fixture input nodes; mock provider returns known
-  output; assert the enrichment diff is correct; assert accept writes the new version
+  the prompt; calls the configured fantasy provider; writes the output as an
+  enrichment (version bump on the existing node, not a new node) pending user
+  review
+- Output shown as a diff in the TUI right pane with `[a]ccept / [e]dit / [d]iscard`
+- Tests: fixture prompt node + fixture input nodes; mock fantasy provider returns
+  known output; assert the enrichment diff is correct; assert accept writes the
+  new version
 - **Acceptance:** `make test` passes; end-to-end prompt node round-trip works
 
 ---
