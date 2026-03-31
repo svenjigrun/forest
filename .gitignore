@@ -1,0 +1,4 @@
+bin/
+*.duckdb
+.forest/
+testforest/
