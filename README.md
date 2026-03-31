@@ -110,24 +110,153 @@ git-like log of append operations).
 
 ---
 
-## Data Storage
+## Addressing and Federation
+
+### Node URLs as canonical identifiers
+
+A node's stable, shareable address is a URL. Not a UUID with a URL wrapper
+— the URL *is* the ID. This has several consequences:
+
+- A node created on a personal instance resolves at
+  `https://alice.example/nodes/01HXZJ...` and that address is permanently
+  valid as long as Alice's instance exists (or forwards).
+- Nodes can be linked across instances without any central registry. A node
+  on Bob's instance can cite a node on Alice's instance using her URL
+  directly.
+- Merging two nodes means one URL becomes a redirect to the other. All
+  inbound links from other instances eventually resolve to the canonical
+  address. This is the same mechanism the web uses for moved resources;
+  it is well-understood and does not require coordination.
+- Local-only nodes (not yet published) carry a provisional local ID that
+  is promoted to a URL when the user chooses to make them addressable.
+
+### ActivityPub as the federation layer
+
+ActivityPub (the W3C standard underlying Mastodon, Lemmy, and others) is
+a strong candidate for the federation protocol, for specific reasons that
+go beyond "it already exists":
+
+**Actors and objects map cleanly.** In ActivityPub, an Actor (a user or
+instance) publishes Objects. A node is an Object. An enrichment to a node
+is an `Update` activity. A link between two nodes is a `Link` or a custom
+activity type. The vocabulary is not a perfect fit, but it is close enough
+that the mismatch is in extension, not in contradiction.
+
+**JSON-LD is the wire format.** ActivityPub uses JSON-LD, which means every
+node's content, links, and provenance can be expressed as a machine-readable
+semantic graph out of the box. This aligns with the Semantic Web lineage in
+the prior work table — but with ActivityPub you get the infrastructure
+(delivery, federation, actor discovery) for free.
+
+**Inboxes enable push-based context updates.** When a node Alice cites is
+updated by Bob, Bob's instance can deliver an `Update` activity to Alice's
+inbox. Alice's system can then decide — based on her active contexts and the
+ageing state of her local copy — whether to surface the update, enrich her
+local node, or ignore it. This is a richer model than polling or webhooks.
+
+**The web as a superset.** If a node's URL resolves to a human-readable
+HTML page (with the JSON-LD representation in a `<script type="application/
+ld+json">` block or via content negotiation), then the node is also a
+first-class web resource. Any browser can read it. Any search engine can
+index it. Purple becomes a layer on top of the web rather than a silo
+alongside it. A user's published nodes are, in effect, their presence on
+the web — without pages.
+
+**Where ActivityPub needs extending.** ActivityPub's object model was
+designed for social content (posts, likes, follows), not for a typed
+knowledge graph. Extensions needed:
+
+- typed link relationships beyond `inReplyTo` (cites, contradicts,
+  transcluded-from, corroborates)
+- node versioning with diffable history
+- context nodes as a first-class object type
+- ageing/recency signals that instances can exchange without leaking
+  interaction metadata
+
+These are vocabulary extensions, not protocol changes. The Linked Data
+ecosystem (schema.org, the Activity Streams vocabulary) provides a
+foundation; custom `@context` entries handle the rest.
+
+### Programmatic addressability
+
+Beyond locating a specific node by URL, there is a second kind of
+addressability: **querying a set of nodes by expression**. This is where
+the graph becomes programmable.
+
+**SQL over the local graph**  
+For a single-user local instance backed by SQLite, SQL is already the query
+language for the store. Exposing a read-only SQL interface (even a restricted
+subset) lets power users and integrations express precise queries:
+
+```sql
+SELECT n.id, n.content
+FROM nodes n
+JOIN edges e ON e.source_id = n.id
+WHERE e.type = 'cites'
+  AND e.target_id = 'https://alice.example/nodes/01HXZJ...'
+  AND n.recency_score > 0.3
+ORDER BY n.recency_score DESC;
+```
+
+This is not a user-facing feature. It is a developer/integration surface —
+the foundation for building context plugins, export tools, and bridges to
+other systems.
+
+**JSONata for node content**  
+Where SQL addresses the graph structure, JSONata addresses the content
+*within* nodes. A node may contain structured data (a list, a table, a
+set of key-value pairs embedded in Markdown or as a JSON block). JSONata
+expressions can extract, transform, and project that content:
+
+```
+nodes[provenance.source = "user"]
+  .{ "id": id, "first_sentence": $substringBefore(content, ".") }
+```
+
+This is useful for transclusion — instead of transcluding an entire node,
+a `{{node-id | $.items[status="open"]}}` expression transcludes only the
+matching fragment. The transclusion is live: as the source node is enriched,
+the expression re-evaluates.
+
+**URL as a query carrier**  
+These two approaches compose into a URL scheme for programmatic
+addressability:
+
+```
+https://alice.example/nodes?cites=https://bob.example/nodes/XYZ&since=2024
+https://alice.example/nodes/01HXZJ.../fragment?q=$.items[status%3D"open"]
+```
+
+The first form returns a set of nodes (a context, in effect). The second
+returns a fragment of a single node's content. Both are cacheable, linkable,
+and composable with the federation layer — another instance can subscribe
+to a query URL and receive push updates when the result set changes.
+
+This is the path by which Purple could become a superset of general web
+use rather than a parallel system: nodes replace pages, queries replace
+navigation, and federation replaces centralised hosting — while remaining
+fully compatible with how links and URLs already work.
+
+---
+
+
 
 ### Node Schema (simplified)
 
 ```json
 {
-  "id": "01HXZJ...",
+  "id": "https://alice.example/nodes/01HXZJ...",
   "content": "The paragraph is the atom of meaning.",
   "content_type": "text/markdown",
   "created_at": "2026-03-31T09:14:00Z",
-  "versions": ["01HXZJ...-v0"],
+  "versions": ["https://alice.example/nodes/01HXZJ.../v/0"],
   "provenance": {
     "source": "user",
     "imported_url": null
   },
   "links": [
-    { "type": "cites", "target_id": "01HWAB..." },
-    { "type": "transcluded_from", "target_id": "01HWAB...", "target_url": "https://example.com/post#pNNN" }
+    { "type": "cites", "target_id": "https://alice.example/nodes/01HWAB..." },
+    { "type": "transcluded_from", "target_id": "https://bob.example/nodes/01HWAB...", "target_url": "https://example.com/post#pNNN" }
   ],
   "contexts": ["project:purple", "location:home", "time:2026-Q1"]
 }
@@ -405,12 +534,7 @@ at any time, on their own terms.
 
 ---
 
-
-
-- **Identity and addressability across devices**: Purple Numbers assumed a
-  single canonical document. In a distributed, sync'd graph, what does a
-  stable, shareable node address look like? Content-hashing, UUIDs, or
-  something cryptographic?
+## Open Questions / Design Tensions
 
 - **Context explosion** (partially addressed): Because contexts are nodes
   and follow the same enrich-before-create rule, the system resists
@@ -461,8 +585,11 @@ at any time, on their own terms.
 | Roam Research | Bi-directional block references, daily notes as context | Remove the page; make context dynamic not structural |
 | Notion | Rich blocks, databases, views | Remove the hierarchy; unify document and database |
 | Memex (Bush) | Associative trails as navigation | Make the trails automatic and multi-signal |
-| Semantic Web | Machine-readable typed links | Keep the semantics, remove the bureaucracy |
+| Semantic Web / JSON-LD | Machine-readable typed links, shared vocabularies | Keep the semantics, remove the bureaucracy |
+| ActivityPub (W3C) | Federated actor/object model, inbox delivery, JSON-LD wire format | Extend vocabulary for typed knowledge links, versioning, context nodes |
 | Obsidian | Local-first, markdown, graph view | Make the context dynamic; make the AI integral, not a plugin |
+| JSONata | Declarative expression language for JSON traversal and projection | Use as the fragment query language for live transclusion |
+| SQL | Relational query over structured data | Expose as a read-only developer surface over the local node store |
 
 ---
 
