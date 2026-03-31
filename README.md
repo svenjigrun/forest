@@ -175,6 +175,7 @@ knowledge graph. Extensions needed:
   transcluded-from, corroborates)
 - node versioning with diffable history
 - context nodes as a first-class object type
+- schema nodes and schema-version links as a first-class object type
 - ageing/recency signals that instances can exchange without leaking
   interaction metadata
 
@@ -237,10 +238,148 @@ returns a fragment of a single node's content. Both are cacheable, linkable,
 and composable with the federation layer — another instance can subscribe
 to a query URL and receive push updates when the result set changes.
 
-This is the path by which Purple could become a superset of general web
+This is the path by which Forest could become a superset of general web
 use rather than a parallel system: nodes replace pages, queries replace
 navigation, and federation replaces centralised hosting — while remaining
 fully compatible with how links and URLs already work.
+
+---
+
+## Structured Data
+
+### Nodes are content-type agnostic
+
+A node's content is not required to be prose. It can be:
+
+- a Markdown paragraph (the default)
+- a JSON or JSON-LD object
+- a CSV or Arrow/Parquet table
+- a full dataset with schema and metadata
+- a reference to an external dataset (a pointer, not a copy)
+
+The content type is declared on the node. Rendering, querying, and
+diffing are handled by the view layer, which selects an appropriate
+representation based on content type and active context. A user querying
+a set of nodes does not need to know — or care — whether the data lives
+in one node, many nodes, or an external source. The view is the
+abstraction; the storage topology is an implementation detail.
+
+### Storage topologies
+
+Three topologies, all first-class:
+
+**1. Whole-dataset node**  
+The entire dataset — schema, metadata, and records — lives in a single
+node. Suitable for small or self-contained datasets. The node is
+addressable as a unit; individual records are addressable via fragment
+queries (JSONata or SQL-over-node). A spreadsheet, a contacts list, a
+configuration table.
+
+**2. Record-per-node with a schema node**  
+Each record is its own node, linked to a shared schema node. The schema
+node defines field names, types, and constraints. Each record node links
+to a specific version of the schema. Suitable when individual records are
+themselves concepts worth addressing, linking, and enriching independently
+— a collection of books, a set of meeting notes with a common structure,
+a project tracker where each task is a node.
+
+**3. External dataset reference**  
+The node contains a pointer to an external data source — a URL, a
+DuckDB/DuckLake catalogue entry, a database connection — plus the schema
+and query needed to materialise a view. The data is not stored in the
+graph; the node is the address and the intent. The view layer resolves
+the pointer at query time, caches aggressively, and presents the result
+identically to topologies 1 and 2. This is how Forest connects to live
+data: a node that references a Postgres table, a Parquet file on S3, or
+a public data API is indistinguishable to the user from a node that
+contains the data locally.
+
+These topologies compose: a context can mix prose nodes, record nodes,
+and external-reference nodes in the same view. The query layer
+normalises them.
+
+### Schema nodes
+
+A schema node is a first-class node. It holds:
+
+- field definitions (name, type, constraints, description)
+- a version identifier
+- a link to its predecessor schema version (if any)
+- uplift instructions: how to transform a record from the previous version
+  to this one
+
+Record nodes link to a specific schema version, not to the schema node
+itself. This means the schema can evolve without invalidating existing
+records. When a record node is opened for editing, the system checks
+whether its linked schema version is current:
+
+- if current: edit normally
+- if behind: present the uplift as a diff for the user to review and
+  confirm before editing; the node is then re-linked to the current
+  schema version
+- if the uplift is ambiguous (a field was split, a type changed
+  non-trivially): surface the specific conflict with UX to resolve it,
+  rather than silently applying a best-guess transformation
+
+Schema nodes age and link the same as any other node. A schema from a
+project abandoned five years ago is not deleted — it is aged, but still
+linked from the record nodes that use it, and still resolvable. Reviving
+those records means either uplifting them to a current schema or working
+with the old one explicitly.
+
+### Querying across topologies
+
+The query surface is uniform regardless of topology. Three layers:
+
+**Fragment queries within a node** — JSONata for JSON/document content,
+SQL for tabular content within a single node. These operate on the node's
+content directly and are used in live transclusion:
+
+```
+{{https://alice.example/nodes/contacts | $.people[active=true].name}}
+```
+
+**Graph queries across nodes** — SQL or a graph query language (Cypher,
+SPARQL) over the node store. These traverse the link structure and can
+join prose nodes, record nodes, and schema nodes:
+
+```sql
+SELECT r.id, r.content->>'name' AS name
+FROM nodes r
+JOIN edges e ON e.source_id = r.id AND e.type = 'schema'
+JOIN nodes s ON s.id = e.target_id
+WHERE s.content->>'entity' = 'contact'
+  AND r.recency_score > 0.2;
+```
+
+**External queries** — for external-reference nodes, the query is
+delegated to the external engine (DuckDB, a REST API, a SQL database).
+The result is returned as a virtual node set, rendered identically to
+local record nodes, and can be saved as a context or transcluded.
+
+The three layers are composable: a context can be defined as a join
+across a local graph query and an external query, with the results
+merged and ranked by the relevance engine.
+
+### Structured data and the AI layer
+
+The enrichment-first principle applies to structured data, but the
+mechanics differ from prose:
+
+- For record-per-node datasets, AI enrichment proposes changes to
+  individual record nodes — new field values, corrected entries, added
+  links to related nodes — presented as cell-level diffs rather than
+  text diffs.
+- For whole-dataset nodes, AI can propose new records, schema amendments,
+  or derived columns — each as a reviewable change.
+- For external-reference nodes, AI cannot enrich the source (it is
+  external), but can propose a local annotation node linked to the
+  external reference, capturing observations about the dataset without
+  modifying it.
+
+Schema changes proposed by AI are treated with extra caution: they
+always require explicit user confirmation, and the uplift instructions
+are shown in full before being applied to any record node.
 
 ---
 
@@ -594,7 +733,8 @@ at any time, on their own terms.
 | ActivityPub (W3C) | Federated actor/object model, inbox delivery, JSON-LD wire format | Extend vocabulary for typed knowledge links, versioning, context nodes |
 | Obsidian | Local-first, markdown, graph view | Make the context dynamic; make the AI integral, not a plugin |
 | JSONata | Declarative expression language for JSON traversal and projection | Use as the fragment query language for live transclusion |
-| SQL | Relational query over structured data | Expose as a read-only developer surface over the local node store |
+| SQL | Relational query over structured data | Expose as a read-only developer surface over the local node store; delegate to external engines for external-reference nodes |
+| DuckDB / DuckLake | In-process OLAP over local and remote Parquet/Arrow data | Model for external-reference nodes: the node is a pointer + query; DuckDB materialises the view at query time |
 
 ---
 
