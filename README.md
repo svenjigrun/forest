@@ -53,10 +53,33 @@ media) with:
 - zero or more typed outbound links (cites, responds-to, contradicts,
   transcluded-from, imported-from)
 - zero or more context tags (auto- and user-assigned)
-- provenance metadata (written-by-user, imported-from-url, generated-by-query)
+- provenance metadata (written-by-user, imported-from-url)
 
-Nodes are immutable once written; edits create new versions that point back
-to the prior version. The graph is append-only at the node level.
+**Nodes are not cheap.** The system does not create nodes freely. A new node
+is only created when a concept genuinely has no existing home in the graph.
+The default behaviour for every interaction — a query, an AI response, an
+edit, an import — is to find the best existing node and *enrich* it, not
+spawn a new one. Node count is a signal of the graph's conceptual breadth,
+not its activity level.
+
+Node lifecycle:
+
+1. **Write** — user authors a new concept that has no existing node. A node
+   is created.
+2. **Enrich** — information arrives (user edit, AI synthesis, external
+   import) that belongs to an existing concept. The existing node is updated
+   in-place; the prior version is kept in history but does not appear as a
+   separate node in any view.
+3. **Split** — a node has grown to contain two genuinely distinct concepts.
+   The user (or AI, with user approval) splits it into two nodes with a typed
+   link between them. The original version is retained in history.
+4. **Merge** — two nodes turn out to be about the same concept. They collapse
+   into one; all edges from both are preserved on the merged node.
+
+Edits record a version history internally, but that history is not a
+proliferation of nodes — it is a log attached to a single node. The graph's
+topology reflects *what the user knows*, not *how many times they interacted
+with the system*.
 
 ### The Graph Store
 
@@ -159,28 +182,44 @@ node embeddings, but the query is dynamic and multi-signal.
 - Index: approximate nearest-neighbor (FAISS, SQLite-vec, or hnswlib) over
   the embedding store
 
-### 2. On-Demand External Retrieval
+### 2. Graph-First Synthesis
 
-When the user asks a question or pastes a URL, the AI layer:
-
-- decides whether the answer likely exists in the local graph (retrieval) or
-  needs to be fetched externally (search + ingest)
-- issues structured queries against the graph and/or calls external
-  APIs/Claude API
-- returns the answer as a new node (with provenance marking it AI-generated),
-  linked to the source nodes it synthesized from
-
-The Claude API (`claude-sonnet-4-6` or `claude-haiku-4-5`) is the right
-model here: capable enough to synthesize across multiple retrieved nodes,
-fast enough for interactive use.
+When the user asks a question or enters a context, the AI layer's first
+obligation is to the existing graph, not to generation. The flow is:
 
 ```
-User writes paragraph → embeddings computed →
-  nearest neighbors retrieved from graph →
-    passed as context to Claude API →
-      response returned as a new candidate node →
-        user accepts / edits / discards
+User query / active context
+  → retrieve candidate nodes by embedding similarity
+  → rank and cluster by conceptual overlap
+  → present existing nodes as the primary answer
+
+If existing nodes are incomplete:
+  → AI drafts enrichments to specific nodes (not new nodes)
+  → user reviews diffs against the existing content
+  → user accepts, edits, or discards each enrichment
+  → accepted enrichments are written as a new version of the existing node
+
+Only if no existing node is close enough:
+  → AI drafts a new node
+  → user accepts / edits / discards
+  → accepted node enters the graph
 ```
+
+The key inversion from a standard RAG pattern: the output of AI synthesis is
+a **proposed edit to an existing node**, not a new document. The graph
+accumulates depth, not breadth. A node about "contextual relevance" that has
+been enriched ten times over six months is far more valuable than ten
+separate AI-generated summaries of the same idea.
+
+When enriching, the AI annotates what it is changing and why — provenance is
+recorded at the version level ("enriched from query: X, drawing on nodes
+A, B, C") so the history of how a node evolved is always recoverable.
+
+External sources follow the same rule: ingested content is matched against
+existing nodes first. If a paragraph from an external URL says the same
+thing as an existing node, it is linked as a `corroborates` edge, not
+duplicated as a new node. Only genuinely new concepts from external sources
+become new nodes.
 
 ### 3. Context Inference
 
@@ -269,9 +308,12 @@ Creating a link between two nodes is as lightweight as typing. The system
 suggests links as the user writes (based on embedding similarity to existing
 nodes). The user can accept, reject, or retype the relationship label.
 
-**5. The AI is an assistant, not an author.**  
-AI-generated nodes are always marked. The user decides whether to accept them
-into the graph. The system never silently modifies the user's own nodes.
+**5. The AI deepens existing nodes; it does not multiply them.**  
+AI output defaults to proposing enrichments to existing nodes, presented as
+diffs. New nodes are only proposed when no existing node is a reasonable
+home for the concept. The user reviews and approves all AI-proposed changes
+to their own nodes. The graph's node count reflects the actual breadth of
+the user's knowledge, not the volume of their queries.
 
 **6. External information is a guest.**  
 Nodes imported from external sources are clearly distinguished from
@@ -300,10 +342,27 @@ separable.
   users no affordance for where to start. Onboarding must solve for this
   without recreating pages by another name.
 
-- **Provenance and trust**: If external content and AI-generated content live
-  in the same graph as user-authored content, the visual and semantic
-  distinction must be robust enough to survive context-switching and
-  transclusion.
+- **Enrichment conflict**: When AI proposes to enrich a node, the diff must
+  be legible — the user needs to see clearly what changes and why. For short
+  nodes this is simple. For a node that has been enriched many times and
+  grown dense, how do you present a proposed change without burying the user
+  in context?
+
+- **When to split vs. enrich**: The system needs a principled heuristic for
+  when a node has become too broad and should be split. Too aggressive and
+  you recreate the proliferation problem. Too conservative and nodes become
+  monolithic blobs that lose the addressability that makes the graph useful.
+
+- **Merge identity**: When two nodes merge, which ID survives? All inbound
+  links to the absorbed node need to be updated or redirected. In a
+  distributed system with other users holding links, this is a hard
+  consistency problem.
+
+- **The cold-start enrichment problem**: Enrichment only works well once the
+  graph has enough nodes to match against. For a new user with a sparse
+  graph, almost every interaction would propose new nodes — indistinguishable
+  from the proliferation problem. The transition from sparse to dense needs a
+  designed path.
 
 ---
 
